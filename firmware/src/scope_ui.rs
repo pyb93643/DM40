@@ -34,6 +34,10 @@ pub const C_POP_BG: Color = 0xd679; // popup page / selected tab
 pub const C_POP_TAB: Color = 0x5acb; // unselected tab / header
 pub const C_SEL: Color = 0x059e; // list selection, spinner band, slider fill
 pub const C_YELLOW: Color = 0xffe0;
+/// The extra channels' traces (opendm40, docs/scope-gen-channel.md): the
+/// generator (computed) and the DMM's CH2.
+pub const C_GEN_TR: Color = 0x07ff;
+pub const C_CH2: Color = 0xf81f;
 /// The strip value's digits below the accuracy (ui::strip_acc): the DMM
 /// page's VALUE_LOW.
 pub const C_LOW: Color = crate::ui::VALUE_LOW;
@@ -220,6 +224,12 @@ pub struct Model {
     /// CH1 label ("AC mA"); 0 / "" = the stock texts from `vdiv` / "CHA".
     pub wvdiv: f32,
     pub ch1_txt: &'static str,
+    /// Trigger source (scope::TSRC_*): the trigger badge in the GEN
+    /// colour for the generator.
+    pub tsrc: u8,
+    /// The DMM CH2's label in the graph ("CH2 1.5V", magenta); empty =
+    /// none (`CH2_LABEL`, a graph hole).
+    pub ch2_txt: Txt,
 }
 
 /// `Model::src` values.
@@ -295,6 +305,8 @@ impl Model {
         amps: false,
         wvdiv: 0.0,
         ch1_txt: "",
+        tsrc: 0,
+        ch2_txt: Txt::EMPTY,
     };
 
     pub fn pal(&self) -> Color {
@@ -639,7 +651,8 @@ pub fn trig_badge(m: &Model) {
     }
     let e = Ink::icon(sf::SC_EDGE, rect(352, 1, 12, 17), if m.rising { 0x20 } else { 0x21 }, 4);
     let t = Ink::new(sf::SC_F12, rect(364, 1, 50, 17), b.as_str(), 8, 0);
-    badge(rect(352, 1, 62, 17), C_FRAME, C_BAR, Some((rect(353, 2, 60, 15), C_BAR)), &[(&e, m.pal()), (&t, m.pal())]);
+    let c = if m.tsrc == crate::scope::TSRC_GEN { C_GEN_TR } else { m.pal() };
+    badge(rect(352, 1, 62, 17), C_FRAME, C_BAR, Some((rect(353, 2, 60, 15), C_BAR)), &[(&e, c), (&t, c)]);
 }
 
 /// 2.6 battery (outline + level clipped to (437,3,33,12)).
@@ -1424,9 +1437,14 @@ pub struct Graph {
     pub tr: [(i16, i16); 399],
     pub ps: [(i16, i16); 399],
     pub ma: [(i16, i16); 399],
+    /// The GEN trace (C_GEN) and the CH2 trace (C_CH2), under CH1.
+    pub gn: [(i16, i16); 399],
+    pub c2: [(i16, i16); 399],
     d_tr: [(i16, i16); 399],
     d_ps: [(i16, i16); 399],
     d_ma: [(i16, i16); 399],
+    d_gn: [(i16, i16); 399],
+    d_c2: [(i16, i16); 399],
     deco: Deco,
     d_deco: Deco,
     valid: bool,
@@ -1479,9 +1497,13 @@ static mut GRAPH: Graph = Graph {
     tr: [EMPTY; 399],
     ps: [EMPTY; 399],
     ma: [EMPTY; 399],
+    gn: [EMPTY; 399],
+    c2: [EMPTY; 399],
     d_tr: [EMPTY; 399],
     d_ps: [EMPTY; 399],
     d_ma: [EMPTY; 399],
+    d_gn: [EMPTY; 399],
+    d_c2: [EMPTY; 399],
     deco: Deco::NONE,
     d_deco: Deco::NONE,
     valid: false,
@@ -1515,6 +1537,10 @@ pub fn init() {
         g.d_tr[i] = EMPTY;
         g.d_ps[i] = EMPTY;
         g.d_ma[i] = EMPTY;
+        g.gn[i] = EMPTY;
+        g.c2[i] = EMPTY;
+        g.d_gn[i] = EMPTY;
+        g.d_c2[i] = EMPTY;
     }
     g.deco = Deco::NONE;
     g.d_deco = Deco::NONE;
@@ -1687,6 +1713,8 @@ impl Graph {
         self.tr = [EMPTY; 399];
         self.ps = [EMPTY; 399];
         self.ma = [EMPTY; 399];
+        self.gn = [EMPTY; 399];
+        self.c2 = [EMPTY; 399];
     }
 
     /// Bring the panel up to date with `tr` / `ps` / `ma` and the model's
@@ -1696,7 +1724,7 @@ impl Graph {
         let d = self.deco;
         let o = self.d_deco;
         // Nothing changed (most main-loop passes): no per-column work.
-        if self.valid && d == o && self.holes == self.d_holes && self.tr == self.d_tr && self.ps == self.d_ps && self.ma == self.d_ma {
+        if self.valid && d == o && self.holes == self.d_holes && self.tr == self.d_tr && self.ps == self.d_ps && self.ma == self.d_ma && self.gn == self.d_gn && self.c2 == self.d_c2 {
             self.px = 0;
             return;
         }
@@ -1732,7 +1760,8 @@ impl Graph {
         // Colour of graph pixel (fx, fy): markers over the column (`mcol`,
         // the topmost last), math, trace, persistence, the vertical line of
         // the column (`vcol`), horizontal lines, grid (`cm`: col_classes).
-        let pix = |fx: i16, fy: i16, (tr, ps, ma): ((i16, i16), (i16, i16), (i16, i16)), vcol: Option<Color>, mcol: &[usize], cm: u8| -> Color {
+        type Rows = ((i16, i16), (i16, i16), (i16, i16), (i16, i16), (i16, i16));
+        let pix = |fx: i16, fy: i16, (tr, ps, ma, c2, gn): Rows, vcol: Option<Color>, mcol: &[usize], cm: u8| -> Color {
             let (sx, sy) = (13 + fx, d.top + fy);
             for &mi in mcol.iter().rev() {
                 if let Some(c) = minks[mi].at(sx, sy, C_FILL) {
@@ -1744,6 +1773,12 @@ impl Graph {
             }
             if fy >= tr.0 && fy <= tr.1 {
                 return d.trace;
+            }
+            if fy >= c2.0 && fy <= c2.1 {
+                return C_CH2;
+            }
+            if fy >= gn.0 && fy <= gn.1 {
+                return C_GEN_TR;
             }
             if fy >= ps.0 && fy <= ps.1 {
                 return d.half;
@@ -1785,7 +1820,7 @@ impl Graph {
             if full || vl(&d, fx) != vl(&o, fx) {
                 sp.add((1, h - 2));
             } else {
-                for (a, b) in [(self.tr[i], self.d_tr[i]), (self.ps[i], self.d_ps[i]), (self.ma[i], self.d_ma[i])] {
+                for (a, b) in [(self.tr[i], self.d_tr[i]), (self.ps[i], self.d_ps[i]), (self.ma[i], self.d_ma[i]), (self.gn[i], self.d_gn[i]), (self.c2[i], self.d_c2[i])] {
                     if a != b {
                         sp.add(a);
                         sp.add(b);
@@ -1811,11 +1846,13 @@ impl Graph {
                 self.d_tr[i] = self.tr[i];
                 self.d_ps[i] = self.ps[i];
                 self.d_ma[i] = self.ma[i];
+                self.d_gn[i] = self.gn[i];
+                self.d_c2[i] = self.c2[i];
             }
             if sp.n == 0 {
                 continue;
             }
-            let (tr, ps, ma) = (self.tr[i], self.ps[i], self.ma[i]);
+            let (tr, ps, ma, c2, gn) = (self.tr[i], self.ps[i], self.ma[i], self.c2[i], self.gn[i]);
             let vcol = vl(&d, fx);
             // Markers over this column.
             let mut mcol = [0usize; NGRAPH];
@@ -1871,11 +1908,15 @@ impl Graph {
                 for fy in a..=b {
                     let rc = rows[fy as usize];
                     lcd::data(if nm > 0 || rc & R_LINE != 0 {
-                        pix(fx, fy, (tr, ps, ma), vcol, &mcol[..nm], cm)
+                        pix(fx, fy, (tr, ps, ma, c2, gn), vcol, &mcol[..nm], cm)
                     } else if fy >= ma.0 && fy <= ma.1 {
                         d.math
                     } else if fy >= tr.0 && fy <= tr.1 {
                         d.trace
+                    } else if fy >= c2.0 && fy <= c2.1 {
+                        C_CH2
+                    } else if fy >= gn.0 && fy <= gn.1 {
+                        C_GEN_TR
                     } else if fy >= ps.0 && fy <= ps.1 {
                         d.half
                     } else if fy & 1 == 1 && fy <= vrow {
@@ -1931,7 +1972,7 @@ impl Graph {
                             nm += 1;
                         }
                     }
-                    lcd::data(pix(x, r, (self.tr[i], self.ps[i], self.ma[i]), vl(&d, x), &mcol[..nm], col_classes(x)));
+                    lcd::data(pix(x, r, (self.tr[i], self.ps[i], self.ma[i], self.c2[i], self.gn[i]), vl(&d, x), &mcol[..nm], col_classes(x)));
                 }
                 fx = e + 1;
             }
@@ -1940,6 +1981,8 @@ impl Graph {
         self.d_tr = self.tr;
         self.d_ps = self.ps;
         self.d_ma = self.ma;
+        self.d_gn = self.gn;
+        self.d_c2 = self.c2;
         self.d_deco = d;
         self.d_holes = self.holes;
         self.valid = true;
@@ -2100,6 +2143,8 @@ pub fn update(m: &Model) {
     g.set_hole_at(H_FFT_X, add.map(|_| FFT_XDIV));
     g.set_hole_at(H_FFT_PK, add.map(|_| fft_peak_rect(m)));
     g.set_hole_at(H_CUR, (m.cur_tab != 0).then_some(CUR_TAB));
+    let ch2 = !m.ch2_txt.as_str().is_empty();
+    g.set_hole_at(H_SPARE, ch2.then_some(ch2_label_rect(m)));
     let deco0 = g.d_deco;
     let valid0 = g.valid;
     g.flush(m);
@@ -2124,6 +2169,9 @@ pub fn update(m: &Model) {
     let was_fft = ol.math_on && ol.math_mode == 5;
     if fft_on && (bg_changed || d(!was_fft || ol.fft_hz != m.fft_hz || ol.math_colour != m.math_colour)) {
         fft_label(m);
+    }
+    if ch2 && (bg_changed || d(ol.ch2_txt != m.ch2_txt)) {
+        fft_box(ch2_label_rect(m), m.ch2_txt.as_str(), C_CH2);
     }
     if let Some(a) = add {
         let old = if was_fft { ol.fft } else { None };
@@ -2496,6 +2544,14 @@ pub struct PopVals {
     pub pcond: u8,
     pub pwidth: f32,
     pub runt_v: f32,
+    /// Trigger source (scope::TSRC_*) and the GEN trace shown (opendm40,
+    /// docs/scope-gen-channel.md).
+    pub tsrc: u8,
+    pub gen_trace: bool,
+    /// The DMM CH2 shown and its label ("CH2 1.5V"; empty before its
+    /// first start).
+    pub ch2_on: bool,
+    pub ch2_vdiv: Txt,
 }
 
 /// Which popup is open (tab).
@@ -2648,7 +2704,7 @@ pub fn slider_value(x: i16) -> f32 {
 
 /// MF popup page height per tab (box h = 40 + page).
 /// (Trigger: stock 55; opendm40 125 with the trigger-type rows, UF-13.)
-const MF_PAGE_H: [i16; 4] = [150, 100, 125, 55];
+const MF_PAGE_H: [i16; 4] = [150, 200, 175, 55];
 
 /// MF settings popup (FUN_08037574), tab 0..3.
 pub fn draw_mf(tab: u8, v: &PopVals) {
@@ -2697,6 +2753,19 @@ pub fn draw_mf(tab: u8, v: &PopVals) {
             option_list(rect(24, 81, 88, 24), pc, &["On", "Off"], 44, if v.roll { 0 } else { 1 });
             option_list(rect(24, 125, 176, 24), pc, &["OFF", "MIN", "1S", "INF"], 44, v.persist as usize);
             mf_display_values(v);
+            // opendm40: the computed generator trace.
+            fill_c(rect(14, 161, 399, 50), pc, C_POP_BG);
+            fill_text(GT_LABEL, pc, C_POP_BG, sf::SC_F16, GT_LABEL, "GEN trace:", C_FILL, 1, 0);
+            option_list(GT_LIST, pc, &["On", "Off"], 44, if v.gen_trace { 0 } else { 1 });
+            // opendm40: the DMM as CH2 and its V/div.
+            fill_c(rect(14, 211, 399, 49), pc, C_POP_BG);
+            fill_text(C2_LABEL, pc, C_POP_BG, sf::SC_F16, C2_LABEL, "CH2 (DMM):", C_FILL, 1, 0);
+            option_list(C2_LIST, pc, &["On", "Off"], 44, if v.ch2_on { 0 } else { 1 });
+            if v.ch2_on {
+                rbox_text(C2_MINUS, pc, 8, C_BAR, C_POP_BG, sf::SC_F16, "-", C_WHITE);
+                rbox_text(C2_PLUS, pc, 8, C_BAR, C_POP_BG, sf::SC_F16, "+", C_WHITE);
+                fill_text(C2_VALUE, pc, C_POP_BG, sf::SC_F16, C2_VALUE, v.ch2_vdiv.as_str(), C_FILL, 8, 0);
+            }
         }
         2 => {
             fill_c(rect(14, 61, 399, 55), pc, C_POP_BG);
@@ -2727,6 +2796,13 @@ pub fn draw_mf(tab: u8, v: &PopVals) {
                 }
                 _ => {}
             }
+            // opendm40: the trigger source (the generator computed, edge only).
+            fill_c(rect(14, 186, 399, 50), pc, C_POP_BG);
+            fill_text(TS_LABEL, pc, C_POP_BG, sf::SC_F16, TS_LABEL, "Source:", C_FILL, 1, 0);
+            option_list(TS_LIST, pc, &crate::scope::TSRC_NAMES, 60, v.tsrc.min(1) as usize);
+            if v.tsrc == crate::scope::TSRC_GEN {
+                fill_text(TS_NOTE, pc, C_POP_BG, sf::SC_F16, TS_NOTE, "edge, computed", C_FILL, 1, 0);
+            }
         }
         _ => {
             fill_c(rect(14, 61, 399, 55), pc, C_POP_BG);
@@ -2746,6 +2822,21 @@ pub const TP_MINUS: Rect = rect(214, 164, 36, 18);
 pub const TP_VALUE: Rect = rect(254, 164, 104, 18);
 pub const TP_PLUS: Rect = rect(362, 164, 36, 18);
 pub const TR_HINT: Rect = rect(214, 164, 189, 18);
+// Trigger source row, Display tab GEN trace row (opendm40).
+pub const TS_LABEL: Rect = rect(24, 188, 180, 20);
+pub const TS_LIST: Rect = rect(24, 208, 120, 24);
+pub const TS_NOTE: Rect = rect(214, 208, 189, 24);
+pub const GT_LABEL: Rect = rect(24, 163, 180, 20);
+pub const GT_LIST: Rect = rect(24, 183, 88, 24);
+pub const C2_LABEL: Rect = rect(24, 213, 180, 20);
+pub const C2_LIST: Rect = rect(24, 233, 88, 24);
+pub const C2_MINUS: Rect = rect(214, 235, 36, 20);
+pub const C2_VALUE: Rect = rect(254, 235, 104, 20);
+pub const C2_PLUS: Rect = rect(362, 235, 36, 20);
+/// The DMM CH2 label in the graph (a hole, below the FFT's V/div box).
+pub fn ch2_label_rect(m: &Model) -> Rect {
+    rect(18, m.top() + 34, 92, 17)
+}
 
 /// "500ns", "20us", "1ms", "2s": a 1-2-5 time (integer in its unit).
 pub fn fmt_s125(out: &mut Buf, s: f32) {
@@ -2792,6 +2883,12 @@ pub enum MfHit {
     TType(u8),
     PCond(u8),
     Width(bool),
+    /// Trigger source, GEN trace on (opendm40).
+    TSrc(u8),
+    GenTrace(bool),
+    /// The DMM CH2 on, its V/div step (true = up).
+    Ch2(bool),
+    Ch2Step(bool),
     PriScr,
     SaveCsv,
     /// Inside the box, nothing there.
@@ -2838,6 +2935,14 @@ pub fn mf_hit(tab: u8, v: &PopVals, x: i16, y: i16) -> MfHit {
                 MfHit::Bright
             } else if rect(204, 119, 210, 36).has(x, y) {
                 MfHit::Grid
+            } else if let Some(i) = option_hit(GT_LIST, 2, 44, x, y) {
+                MfHit::GenTrace(i == 0)
+            } else if let Some(i) = option_hit(C2_LIST, 2, 44, x, y) {
+                MfHit::Ch2(i == 0)
+            } else if v.ch2_on && near(C2_MINUS) {
+                MfHit::Ch2Step(false)
+            } else if v.ch2_on && near(C2_PLUS) {
+                MfHit::Ch2Step(true)
             } else {
                 MfHit::Inside
             }
@@ -2849,6 +2954,8 @@ pub fn mf_hit(tab: u8, v: &PopVals, x: i16, y: i16) -> MfHit {
                 MfHit::Mode(i)
             } else if let Some(i) = option_hit(TT_LIST, 3, 60, x, y) {
                 MfHit::TType(i)
+            } else if let Some(i) = option_hit(TS_LIST, 2, 60, x, y) {
+                MfHit::TSrc(i)
             } else if v.ttype == crate::trigsoft::PULSE {
                 if let Some(i) = option_hit(TP_COND, 3, 30, x, y) {
                     MfHit::PCond(i)
