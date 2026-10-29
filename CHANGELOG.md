@@ -7,6 +7,51 @@ section named after the tag as the release notes; how to cut a release:
 
 ## Unreleased
 
+### Fixed
+
+- Capacitance AUTO: a small capacitor measured after a large one (600 µF and
+  up) gets its own range again instead of a wrong µF value; open leads or a
+  short after a large capacitor no longer leave **0L mF** / **0.0 mF** on the
+  screen.
+- Capacitance: 6 mF and up read in µF (4700 µF, not 4.700 mF).
+- Capacitance ranges on the meter: MF chooses 60 nF .. 60000 µF or AUTO; the
+  AUTO key steps and resets them as in V / A / Ω. The 6 nF and 60 nF ranges
+  are one (below 6 nF with 3 decimals).
+- Capacitance: 1 .. 47 mF show their first value in about 3 to 4.5 s (was
+  9 to 20 s; 47 mF did not settle); another capacitor on 6 / 60 mF starts
+  the range choice again.
+- Capacitance: the rate chip shows the real update rate on 600 µF and up (a
+  value every few seconds, not 3.9/s); values before a range's first result
+  are grey.
+- Capacitance: the bargraph spans the range (600 nF on the 600 nF range), not
+  ten times it.
+
+### New
+
+- **600 MΩ range, experimental:** on the range page or SCPI
+  `RES:RANG 600E6` only, never in AUTO; accuracy not specified. Leave the
+  leads open once: it learns the meter's own leakage
+  ([manual](docs/manual/README.md#resistance)).
+
+  ![The 600 MΩ range page and reading](docs/changelog/v0.4.0/ohm-600m.png)
+
+### Changed
+
+- **The update loader no longer opens by itself** after repeated hangs (a
+  hang restarts the meter).
+- **Leaving the update loader:** opened with the power-key hold or
+  `DBG:LOADER`, the loader now lets the installed firmware start again when
+  you switch the meter off and on; no reinstall is needed.
+  [How to reach it](docs/manual/README.md#reach-the-update-loader).
+- Smoother screen changes: pages, popups and DMM functions draw over the old
+  screen, not over a blank one; an MF menu tab redraws only the menu.
+
+### Fixed
+
+- **Battery charging** is shown: on the charger the battery is green, its top bar blinks while it charges
+  and stays when full; a USB symbol (also on the scope page) while a computer has the meter connected
+  ([manual](docs/manual/README.md#the-status-bar)).
+
 ## v0.3.0 (2026-10-27)
 
 ### New
