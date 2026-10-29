@@ -515,8 +515,9 @@ impl App {
             guide: now < sp.guide_until || sp.touch.is_some_and(|t| t.hit || t.moving),
             xcur: if self.cur.x_on { Some([self.cur.x[0] as i16, self.cur.x[1] as i16]) } else { None },
             ycur: if self.cur.y_on { Some([self.cur.y[0] as i16, self.cur.y[1] as i16]) } else { None },
-            battery: self.power.bars.min(5),
-            charging: self.power.charging(),
+            battery: self.power.shown_bars(now / 1000 & 1 == 1),
+            charging: self.power.on_charger(),
+            usb: self.usb_host,
             roll: self.scope.rolling(),
             record,
             // Combined view: the strip's GEN badge shows it instead.
@@ -546,8 +547,12 @@ impl App {
                 su::SRC_MCX
             },
             amps,
-            wvdiv: if wave { self.scope.vdiv() } else { 0.0 },
+            // The V/div text from the value (fmt_div) also off the Wave
+            // view: `vdiv`'s label is wrong with a x2 / x5 ... probe (#133).
+            wvdiv: self.scope.vdiv(),
             ch1_txt: if wave { self.wave_func_label() } else { "" },
+            // The combined view shows REC in the strip badge.
+            rec: self.view == View::Scope && crate::csvlog::active(),
         }
     }
 
@@ -621,9 +626,14 @@ impl App {
         if self.sp.covered() {
             return;
         }
-        let Some(r) = self.shown_reading() else {
-            su::meter_strip(&su::StripData::EMPTY);
-            return;
+        let r = match self.shown_reading() {
+            Some(r) => r,
+            // The power meter before its first reading (#108).
+            None if self.dmm.pw.on => self.pw_strip_wait(),
+            None => {
+                su::meter_strip(&su::StripData::EMPTY);
+                return;
+            }
         };
         let (hold, lim) = (self.meter.hold_state(), self.meter.verdict());
         let mut d = ui::strip_data(&r, hold, lim, self.meter.rel_active(), self.hv_level, self.strip_alt, self.dmm_view.label, crate::csvlog::active());
@@ -646,6 +656,8 @@ impl App {
     /// The page from the cached frame and the model (all of it after
     /// `su::invalidate`, the graph after `su::uncover`).
     fn sp_draw_page(&mut self) {
+        // An open popup's box is drawn last: the graph leaves it alone.
+        su::graph().set_hole_at(su::H_POPUP, su::popup_box(self.sp.popup));
         self.sp.bubble_dirty = self.sp.bubble;
         self.sp_render();
         self.sp_math();
@@ -875,11 +887,9 @@ impl App {
         let amps = wave && self.scope.wave_scale_now().amps;
         let unit = if amps { "A" } else { "V" };
         let mut v = su::Buf::new();
-        if wave {
-            su::fmt_div(&mut v, self.scope.vdiv(), unit);
-        } else {
-            su::vdiv_text(&mut v, vdiv_idx(s.range, s.probe));
-        }
+        // From the value: the label table index (vdiv_idx) is wrong with
+        // a x2 / x5 ... probe (#133).
+        su::fmt_div(&mut v, self.scope.vdiv(), unit);
         let mut sr = su::Buf::new();
         su::fmt_hz(&mut sr, fs as f32);
         let sr = sr.as_str();
@@ -1997,7 +2007,7 @@ impl App {
             su::fmt_div(&mut b, self.wave_step_vdiv(p.i), if self.scope.wave_scale_now().amps { "A" } else { "V" });
             b.push("/div");
         } else {
-            su::vdiv_text(&mut b, vdiv_idx(p.i, self.scope.s.probe));
+            su::fmt_div(&mut b, scope::VDIV[p.i.min(9)] * self.scope.s.probe, "V");
             b.push("/div");
         }
         let t = sf::Ink::new(sf::SC_F16, BUBBLE, b.as_str(), 8, 0);
@@ -2123,6 +2133,8 @@ impl App {
     }
 
     fn sp_popup_draw(&mut self) {
+        // The box's fills wait for its widgets (lcd.rs "deferred fills").
+        crate::lcd::defer_start();
         let v = self.sp_popvals();
         su::draw_popup(self.sp.popup, &v);
     }
@@ -2177,6 +2189,7 @@ impl App {
         // menu "Screenshot" closes it first) after SHOT_SETTLE_MS.
         self.scope_invalidate();
         self.repaint_at = self.now;
+        crate::lcd::defer_start();
         let m = self.sp_model(self.now);
         su::uncover(&m, u & 1 != 0, u & 2 != 0);
         self.sp_draw_page();
@@ -2353,9 +2366,21 @@ impl App {
             su::MfHit::Outside | su::MfHit::Inside | su::MfHit::Bright | su::MfHit::Grid => return,
             su::MfHit::Tab(t) => {
                 if t != tab {
-                    // A shorter page: the page under the old box comes back.
+                    let old = su::popup_box(self.sp.popup);
                     self.sp.popup = su::Popup::Mf(t);
-                    self.redraw = true;
+                    let new = su::popup_box(self.sp.popup);
+                    if let (View::Scope, Some(o), Some(n)) = (self.view, old, new) {
+                        // The new box, then the graph rows the old one
+                        // covered and the new one does not.
+                        self.sp_popup_draw();
+                        let m = self.sp_model(now);
+                        su::regraph_rows(&m, n, n.y + n.h, o.y + o.h);
+                    } else {
+                        // The combined view (its popups cover the meter
+                        // strip): the whole page, the graph skipping the
+                        // new box (sp_draw_page).
+                        self.redraw = true;
+                    }
                 }
                 return;
             }
